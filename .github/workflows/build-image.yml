@@ -1,0 +1,243 @@
+name: reusable / build-image
+
+# Produces one complete, published image: every arch built and pushed by
+# digest, then assembled into the final multi-arch tag — no chart, no
+# release management, no scan (publish-chart.yml's, publish-github-release.yml's
+# and scout.yml's jobs, called separately by the trigger file). See the
+# README for the per-repo/per-image calling shape.
+#
+# Manifest assembly lives here, not in a publish workflow of its own,
+# because the per-arch digests exist only to be assembled — nothing outside
+# this file ever reads them. Splitting the two would publish an internal
+# handoff as a cross-workflow contract for no consumer.
+#
+# Native multi-arch (per-arch runner + digest assembly) is the only build
+# strategy — no qemu fallback, no fork-safe relay. The arm64 leg runs on the
+# ubuntu-latest-arm64 runner label, which every calling repo needs access
+# to; add a fallback only if a consumer actually needs one.
+#
+# Every composite-action reference below is pinned to the full
+# owner/repo/path@ref form — see validate.yml's header for why a local `./`
+# path can't be used here even though this action lives in the same repo.
+#
+# Those refs are pinned to the tag this repo is releasing as, never to
+# develop — see validate.yml's header, and scripts/pin-internal-refs.py.
+#
+# Uploaded artifact names are scoped by ${{ inputs.image-name }} — this
+# workflow can be called more than once per workflow run (a repo with a
+# second image calls it twice in the same ci.yml). Without scoping, two
+# calls in the same run would try to upload identically-named artifacts and
+# GitHub Actions would reject the second one.
+#
+# The separator between the image name and the arch is a DOUBLE dash, and
+# that is load-bearing. With a single dash, the manifest job's download
+# pattern "digest-<name>-*" also matches every artifact of any image whose
+# name merely STARTS WITH this one — building my-app alongside
+# my-app-workspace would make my-app's manifest job download all four
+# digests and try to assemble one image out of two.
+#
+# A double dash disambiguates because a Docker repository name can never end
+# in a separator, so "<name>--" cannot be a prefix of "<longer-name>--".
+# Changing this scheme means changing the upload name and the download
+# pattern together.
+#
+# No standalone tag job — its validation and resolution both live in
+# resolve-image-tag itself now, called as the matrix job's first step. That
+# means the release-branch-policy check and the tag resolution both run
+# once per matrix leg (amd64 and arm64 each do it independently) instead of
+# once for the whole workflow — harmless duplication, since both are a pure
+# function of shared context (github.ref_name, inputs.image-tag) and always
+# compute the identical result regardless of which leg runs it. The `tag`
+# job output below is likewise sourced from a matrix job, which has a
+# documented GitHub Actions quirk: when multiple matrix legs set the same
+# job output key, which leg's value "wins" is not deterministic. Harmless
+# here for the same reason — every leg computes the same value.
+on:
+  workflow_call:
+    inputs:
+      image-name:
+        type: string
+        required: true
+      registry-namespace:
+        description: 'Registry namespace, e.g. portainerci for CI/dev, portainer for a real release'
+        type: string
+        required: false
+        default: 'portainerci'
+      app-repositories:
+        description: 'Comma-separated repo list the checkout token is scoped to: this repo plus any private submodules'
+        type: string
+        required: true
+      submodules:
+        type: string
+        required: false
+        default: 'true'
+      dockerfile-context:
+        type: string
+        required: false
+        default: '.'
+      build-args:
+        description: 'Multi-line KEY=VALUE build args, appended to GIT_COMMIT/BUILD_DATE which are always set'
+        type: string
+        required: false
+        default: ''
+      image-tag:
+        description: >
+          Optional explicit tag override, forwarded to resolve-image-tag.
+          Leave empty for normal CI/dev calls (pr-<n>/develop/branch
+          auto-detection). Required for a pre-release/release dispatch —
+          gates a release/X.Y-branch check in resolve-image-tag.
+        type: string
+        required: false
+        default: ''
+      enforce-release-branch:
+        description: >
+          Whether an explicit image-tag must come from a release/X.Y branch.
+          Default true; a consumer opts out by setting this false in its own
+          checked-in release.yml, never as a workflow_dispatch input.
+        type: boolean
+        required: false
+        default: true
+    secrets:
+      app-id:
+        required: true
+      app-private-key:
+        required: true
+      registry-username:
+        required: true
+      registry-password:
+        required: true
+    outputs:
+      tag:
+        description: 'The resolved image tag, e.g. 0.7.0 or develop — feed into publish-chart.yml / publish-github-release.yml as the version'
+        value: ${{ jobs.image.outputs.tag }}
+      image-ref:
+        description: >
+          Full <namespace>/<name>:<tag> reference of the assembled multi-arch
+          tag. Feed straight into scout.yml and publish-github-release.yml
+          instead of rebuilding the string by hand, which would silently
+          depend on this workflow's registry-namespace default never
+          changing.
+        value: ${{ jobs.manifest.outputs.image-ref }}
+
+jobs:
+  # Job id deliberately distinct from any caller's own job id (every caller
+  # names its own job "build-image") — GitHub's matrix grouping label is
+  # literally "Matrix: <caller job id> / <this job id>", so sharing a word
+  # there reads as an odd near-duplicate ("build-image / build") instead of
+  # a clean caller/callee pair.
+  image:
+    name: ${{ matrix.arch }}
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-latest-arm64
+    runs-on: ${{ matrix.runner }}
+    outputs:
+      tag: ${{ steps.resolve.outputs.value }}
+    steps:
+      - id: resolve
+        uses: portainer/github-actions/.github/actions/resolve-image-tag@v1.0.0
+        with:
+          image-tag: ${{ inputs.image-tag }}
+          enforce-release-branch: ${{ inputs.enforce-release-branch }}
+
+      - uses: portainer/github-actions/.github/actions/checkout-with-submodules@v1.0.0
+        with:
+          app-id: ${{ secrets.app-id }}
+          private-key: ${{ secrets.app-private-key }}
+          repositories: ${{ inputs.app-repositories }}
+          submodules: ${{ inputs.submodules }}
+
+      - id: git-info
+        shell: bash
+        run: echo "sha=$(git log -1 --format=%h)" >> "$GITHUB_OUTPUT"
+
+      - id: build-date
+        shell: bash
+        run: echo "date=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
+      - uses: docker/login-action@b45d80f862d83dbcd57f89517bcf500b2ab88fb2 # v4.0.0
+        with:
+          username: ${{ secrets.registry-username }}
+          password: ${{ secrets.registry-password }}
+
+      - id: push
+        name: '[execution] build and push by digest'
+        uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
+        with:
+          context: ${{ inputs.dockerfile-context }}
+          push: true
+          platforms: linux/${{ matrix.arch }}
+          build-args: |
+            GIT_COMMIT=${{ steps.git-info.outputs.sha }}
+            BUILD_DATE=${{ steps.build-date.outputs.date }}
+            ${{ inputs.build-args }}
+          outputs: type=image,name=${{ inputs.registry-namespace }}/${{ inputs.image-name }},push-by-digest=true,name-canonical=true
+          sbom: true
+          provenance: mode=max
+
+      - name: '[post] save digest'
+        shell: bash
+        run: |
+          mkdir -p /tmp/digests
+          echo "${{ steps.push.outputs.digest }}" > /tmp/digests/${{ matrix.arch }}
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: digest-${{ inputs.image-name }}--${{ matrix.arch }}
+          path: /tmp/digests/*
+          retention-days: 1
+
+  # Assembles the per-arch digests the matrix above just pushed into the one
+  # multi-arch tag everything downstream references. Runs once, after every
+  # arch leg — which is exactly why it can't live inside the matrix job.
+  #
+  # Reads only artifacts scoped to this call's own image-name, so two
+  # concurrent calls in the same run (a repo with a second image) never see
+  # each other's digests. The double dash in the pattern is what makes that
+  # true even when one image's name is a prefix of another's — see this
+  # file's header.
+  manifest:
+    name: manifest
+    needs: [image]
+    runs-on: ubuntu-latest
+    outputs:
+      image-ref: ${{ steps.ref.outputs.value }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: digest-${{ inputs.image-name }}--*
+          path: /tmp/digests
+          merge-multiple: true
+
+      - uses: docker/login-action@b45d80f862d83dbcd57f89517bcf500b2ab88fb2 # v4.0.0
+        with:
+          username: ${{ secrets.registry-username }}
+          password: ${{ secrets.registry-password }}
+
+      # Built once here and exposed as this workflow's image-ref output, so
+      # no caller has to know how the reference is spelled.
+      - id: ref
+        shell: bash
+        env:
+          IMAGE_REPO: ${{ inputs.registry-namespace }}/${{ inputs.image-name }}
+          TAG: ${{ needs.image.outputs.tag }}
+        run: echo "value=${IMAGE_REPO}:${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: '[execution] assemble multi-arch manifest'
+        shell: bash
+        working-directory: /tmp/digests
+        # Never a :latest tag here — deliberate, consumers always reference an explicit tag.
+        env:
+          IMAGE_REPO: ${{ inputs.registry-namespace }}/${{ inputs.image-name }}
+          IMAGE_REF: ${{ steps.ref.outputs.value }}
+        run: |
+          digests=$(for f in *; do printf '%s@%s ' "$IMAGE_REPO" "$(cat "$f")"; done)
+          docker buildx imagetools create \
+            --tag "$IMAGE_REF" \
+            $digests

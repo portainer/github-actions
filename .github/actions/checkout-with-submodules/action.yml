@@ -1,0 +1,49 @@
+name: checkout-with-submodules
+description: >
+  Mint a short-lived, read-only GitHub App installation token scoped to the
+  calling repo plus any private submodules, then checkout using that token.
+  Composite actions cannot read `secrets:` directly — the app-id/private-key
+  values must be passed through explicitly from the caller's own secrets.
+
+  NOTE: always reference this action via the full pinned path — never a
+  local `./` path, even from this repo's own reusable workflows. See
+  validate.yml's header for why.
+
+inputs:
+  app-id:
+    description: 'GitHub App ID, passed through from the caller''s own secrets'
+    required: true
+  private-key:
+    description: 'GitHub App private key, passed through from the caller''s own secrets'
+    required: true
+  repositories:
+    description: 'Comma-separated repo list the token should be scoped to, e.g. "my-app,my-private-submodule"'
+    required: true
+  submodules:
+    description: 'Value passed to actions/checkout submodules input: true or recursive'
+    required: false
+    default: 'true'
+  ref:
+    description: 'Optional ref to checkout; defaults to the triggering ref'
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: '[preparation] fetch github app token'
+      id: fetch-token
+      uses: actions/create-github-app-token@f8d387b68d61c58ab83c6c016672934102569859 # v3.0.0
+      with:
+        app-id: ${{ inputs.app-id }}
+        private-key: ${{ inputs.private-key }}
+        owner: ${{ github.repository_owner }}
+        repositories: ${{ inputs.repositories }}
+        permission-contents: read
+
+    - name: '[preparation] checkout'
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      with:
+        submodules: ${{ inputs.submodules }}
+        token: ${{ steps.fetch-token.outputs.token }}
+        ref: ${{ inputs.ref }}

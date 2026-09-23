@@ -1,0 +1,35 @@
+name: chart-render-guard
+description: >
+  OPT-IN hardening check: render the chart with no values and assert it
+  contains no Secret / secretKeyRef / secretRef. Meant for an app that gets
+  all runtime config (including credentials) from an external config store,
+  where a chart-rendered Secret would always be a mistake.
+
+  DO NOT enable this by default. Some charts legitimately render a Secret
+  (for example, a generated encryption key carried across helm upgrade via
+  `lookup`, so data encrypted under the old key isn't orphaned), and this
+  would fail their CI and release. Before enabling it for a repo, run
+  `helm template` on its chart and confirm it renders no Secret.
+
+inputs:
+  chart-path:
+    description: 'Path to the chart directory'
+    required: false
+    default: 'chart/'
+  release-name:
+    description: 'Release name to pass to helm template'
+    required: false
+    default: 'release-check'
+
+runs:
+  using: composite
+  steps:
+    - name: '[validation] render chart and check for secrets'
+      shell: bash
+      run: |
+        set -euo pipefail
+        rendered="$(helm template "${{ inputs.release-name }}" "${{ inputs.chart-path }}")"
+        if echo "$rendered" | grep -Eq 'kind: *Secret|secretKeyRef|secretRef'; then
+          echo "::error::Rendered chart contains a Secret/secretKeyRef/secretRef — this repo has enabled chart-render-guard, which asserts config comes from an external config store at runtime, not from the chart."
+          exit 1
+        fi

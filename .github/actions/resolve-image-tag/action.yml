@@ -1,0 +1,81 @@
+name: resolve-image-tag
+description: >
+  Resolve the CI-time image/chart tag, in this order of precedence:
+    1. explicit override (image-tag input), if given
+    2. release/* branch -> cut on "/" -> the line tag (release/2.33 -> 2.33;
+       release/1.4 -> 1.4). This is a LINE tag, constant for every commit on
+       that branch throughout its life — a release/2.33 branch that ships
+       2.33.0, 2.33.1 and so on always has the CI-time tag "2.33"; the exact
+       per-patch version is supplied
+       explicitly by a human at release-dispatch time instead (see
+       release.yml's `version` input).
+    3. pull_request event -> pr-<n>
+    4. otherwise, the branch name with any `/` replaced by `-` (defensive
+       fallback for a branch shape not covered above; for a ci.yml that
+       triggers only on develop/release/**, this path is effectively just
+       `develop`)
+
+  Also enforces the release-branch policy whenever image-tag is an explicit
+  override: an explicit tag only ever comes from a pre-release or release
+  dispatch, both of which must be run from a release/X.Y branch. Lives here,
+  not in build's own steps or validate.yml, so it's checked exactly once
+  regardless of who calls this action.
+
+  enforce-release-branch (default true) lets a consumer opt out of that
+  policy. Deliberately not a workflow_dispatch input on any consumer's
+  release.yml — this is set once in that repo's checked-in file, reviewed
+  like any other change, not something a dispatcher can tick off per-run to
+  bypass the policy live.
+
+  A leading "v" is stripped from an explicit image-tag override too (e.g.
+  release.yml's workflow_dispatch version input accepts "0.4.0" or
+  "v0.4.0") — this repo's convention is a version is always plain X.Y.Z.
+  Harmless for every other caller, whose own auto-detected/explicit values
+  never contain one.
+
+inputs:
+  image-tag:
+    description: 'Optional explicit tag override, takes precedence over auto-detection'
+    required: false
+    default: ''
+  enforce-release-branch:
+    description: 'Whether an explicit image-tag must come from a release/X.Y branch'
+    required: false
+    default: 'true'
+
+outputs:
+  value:
+    description: 'The resolved tag string'
+    value: ${{ steps.resolve.outputs.value }}
+
+runs:
+  using: composite
+  steps:
+    - name: '[validation] release-branch policy'
+      if: inputs.image-tag != '' && inputs.enforce-release-branch == 'true'
+      shell: bash
+      env:
+        REF_NAME: ${{ github.ref_name }}
+      run: |
+        ref="$REF_NAME"
+        if [[ ! "$ref" =~ ^release/[0-9]+\.[0-9]+$ ]]; then
+          echo "::error::An explicit image-tag was supplied (pre-release/release dispatch) but this wasn't run from a release/X.Y branch (got '$ref'). Cut that branch from develop first."
+          exit 1
+        fi
+
+    - name: '[preparation] resolve tag'
+      id: resolve
+      shell: bash
+      env:
+        IMAGE_TAG: ${{ inputs.image-tag }}
+      run: |
+        if [ -n "$IMAGE_TAG" ]; then
+          TAG="${IMAGE_TAG#v}"
+        elif [[ "${GITHUB_REF_NAME}" =~ ^release/.*$ ]]; then
+          TAG=$(echo "$GITHUB_REF_NAME" | cut -d "/" -f 2)
+        elif [ "${GITHUB_EVENT_NAME}" == "pull_request" ]; then
+          TAG="pr-${{ github.event.pull_request.number }}"
+        else
+          TAG=$(echo "$GITHUB_REF_NAME" | sed 's/\//-/g')
+        fi
+        echo "value=${TAG}" >> "$GITHUB_OUTPUT"

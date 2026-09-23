@@ -1,0 +1,67 @@
+name: reusable / scout
+
+# Standalone, not nested inside build-image.yml — every trigger file
+# (ci.yml, release.yml) calls this separately, once PER IMAGE, on whatever
+# build-image.yml just assembled (feed it that call's image-ref output). A
+# repo publishing two images calls this twice. One leg per platform —
+# without an explicit platform, Scout silently only scans one arch of a
+# multi-arch tag.
+#
+# non-blocking reports findings without failing the caller's run. A release
+# typically sets it, since a release must still complete and mark itself
+# latest even if Scout finds something, and there's no PR to gate against on
+# a workflow_dispatch run anyway. A repo still working towards a clean
+# baseline can set it on CI and pre-release too. The default is blocking.
+
+on:
+  workflow_call:
+    inputs:
+      image:
+        description: 'Full image reference to scan, e.g. my-namespace/my-app:develop'
+        type: string
+        required: true
+      non-blocking:
+        type: boolean
+        required: false
+        default: false
+    secrets:
+      registry-username:
+        required: true
+      registry-password:
+        required: true
+
+jobs:
+  # Job id distinct from the caller's own job id — same reasoning as
+  # build-image.yml's `image` job. name: below also drops the now-redundant
+  # "scout" prefix.
+  scan:
+    name: ${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    continue-on-error: ${{ inputs.non-blocking }}
+    permissions:
+      contents: read
+      pull-requests: write
+    strategy:
+      # Each arch's scan result must be visible on its own — without this,
+      # GitHub's default fail-fast: true would cancel the other arch's
+      # still-running scan the moment either one fails, depending purely
+      # on which finishes first.
+      fail-fast: false
+      matrix:
+        # Bare arch, matching build-image.yml's own matrix naming (so
+        # legs read "scout / amd64" not "scout / linux/amd64") — the
+        # linux/ prefix is added only where the action actually needs the
+        # full os/arch form.
+        arch: [amd64, arm64]
+    steps:
+      - uses: portainer/github-actions/.github/actions/docker-scout-scan@v1.0.0
+        with:
+          image: ${{ inputs.image }}
+          platform: linux/${{ matrix.arch }}
+          # Only one leg posts the PR comment — scout-action's comment isn't
+          # additive across matrix legs, it would just overwrite itself.
+          # Also only on pull_request — pre-release/release dispatches have
+          # no PR to comment on.
+          write-comment: ${{ matrix.arch == 'amd64' && github.event_name == 'pull_request' }}
+          registry-username: ${{ secrets.registry-username }}
+          registry-password: ${{ secrets.registry-password }}

@@ -1,0 +1,131 @@
+name: reusable / publish-github-release
+
+# Creates the GitHub Release and marks it latest. One call per REPOSITORY,
+# release path only.
+#
+# Why its own reusable workflow, rather than either alternative:
+# - As a job inside a shared workflow that CI also calls, GitHub's static
+#   per-job permission check would force EVERY caller — ci.yml and
+#   pre-release included — to grant contents: write for something only a
+#   real release uses.
+# - As a job in each consumer's own release.yml, every fix would need
+#   hand-backporting into every open release branch, because a
+#   workflow_dispatch on a release/X.Y branch runs whichever copy of
+#   release.yml exists ON that branch.
+#
+# As its own reusable workflow, only release.yml calls it — so only
+# release.yml grants contents: write — while the logic lives here,
+# tag-pinned and shared, with no backport cost.
+#
+# image-refs is a LIST because a repo can publish more than one image and a
+# release must not be created unless every one of them actually landed.
+# Single-image repos pass one line. Callers should feed it from each
+# build-image call's own image-ref output rather than rebuilding the
+# strings.
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: 'The release version, e.g. 0.7.0 — feed from build-image.yml''s tag output (already v-stripped)'
+        type: string
+        required: true
+      image-refs:
+        description: >
+          Newline-separated list of fully-qualified image references that
+          must exist before the release is created, e.g.
+          my-namespace/my-app:0.7.0. Blank lines are ignored.
+        type: string
+        required: true
+    secrets:
+      registry-username:
+        required: true
+      registry-password:
+        required: true
+
+jobs:
+  release:
+    name: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: '[validation] still the intended latest'
+        id: check
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          # gh api still writes the raw error body to stdout on a 404 (no
+          # release yet) even though it exits non-zero — `|| echo ''`
+          # doesn't erase already-emitted stdout, it only appends to it, so
+          # latest_tag must be reset explicitly on failure rather than
+          # relying on the fallback alone.
+          if ! latest_tag="$(gh api "repos/${{ github.repository }}/releases/latest" --jq .tag_name 2>/dev/null)"; then
+            latest_tag=""
+          fi
+          if [ -z "$latest_tag" ]; then
+            echo "::notice::No existing latest release found — proceeding."
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          highest="$(printf '%s\n%s\n' "$latest_tag" "$VERSION" | sort -V | tail -1)"
+          if [ "$highest" != "$VERSION" ]; then
+            echo "::notice::'$VERSION' is older than GitHub's current latest release ('$latest_tag') — skipping so latest doesn't move backwards. This is a safe no-op, not an error, and can happen if another release run finished in between."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - if: steps.check.outputs.skip != 'true'
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
+      - if: steps.check.outputs.skip != 'true'
+        uses: docker/login-action@b45d80f862d83dbcd57f89517bcf500b2ab88fb2 # v4.0.0
+        with:
+          username: ${{ secrets.registry-username }}
+          password: ${{ secrets.registry-password }}
+
+      # Inlined rather than wrapped in a composite action: a composite
+      # action can't be invoked from inside a bash loop over a
+      # runtime-length list, and the check is two commands — log in once
+      # above, then inspect each ref. Keeps this a single job.
+      - name: '[validation] every image exists'
+        if: steps.check.outputs.skip != 'true'
+        shell: bash
+        env:
+          IMAGE_REFS: ${{ inputs.image-refs }}
+        run: |
+          set -euo pipefail
+          found=0
+          while IFS= read -r ref; do
+            [ -z "${ref// }" ] && continue
+            echo "::group::verifying $ref"
+            docker buildx imagetools inspect "$ref"
+            echo "::endgroup::"
+            found=$((found + 1))
+          done <<< "$IMAGE_REFS"
+          if [ "$found" -eq 0 ]; then
+            echo "::error::image-refs contained no non-blank entries — refusing to create a release without verifying at least one image."
+            exit 1
+          fi
+          echo "::notice::verified $found image(s)."
+
+      # Single call, not create-then-edit — no --prerelease intermediate
+      # state ever exists. github.sha is the exact commit validate/build
+      # already ran against, so this doesn't need to check out anything by
+      # tag name.
+      - name: '[execution] create release'
+        if: steps.check.outputs.skip != 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          gh release create "$VERSION" \
+            --repo "${{ github.repository }}" \
+            --title "$VERSION" \
+            --target "${{ github.sha }}" \
+            --generate-notes \
+            --latest

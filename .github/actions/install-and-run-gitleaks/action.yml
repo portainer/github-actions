@@ -1,0 +1,38 @@
+name: install-and-run-gitleaks
+description: >
+  Download the pinned, checksum-verified OSS gitleaks CLI binary directly and
+  run a secret scan. Deliberately not the gitleaks-action marketplace action,
+  which needs a paid GH Advanced Security license on private repos — the
+  same "transparent, dependency-free check" philosophy as pr-title.yml's
+  plain regex instead of a third-party action.
+  Caller must have checked out with fetch-depth: 0 beforehand.
+
+inputs:
+  gitleaks-version:
+    description: 'gitleaks release version, e.g. 8.30.1'
+    required: false
+    default: '8.30.1'
+  gitleaks-sha256:
+    description: 'Expected sha256 of the linux_x64 tarball for the pinned version'
+    required: false
+    default: '551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb'
+
+runs:
+  using: composite
+  steps:
+    - name: '[preparation] install gitleaks'
+      shell: bash
+      env:
+        GITLEAKS_VERSION: ${{ inputs.gitleaks-version }}
+        GITLEAKS_SHA256: ${{ inputs.gitleaks-sha256 }}
+      run: |
+        set -euo pipefail
+        curl -fsSL -o gitleaks.tar.gz \
+          "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+        echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -
+        tar -xzf gitleaks.tar.gz gitleaks
+        chmod +x gitleaks
+
+    - name: '[validation] run gitleaks'
+      shell: bash
+      run: ./gitleaks detect --source . --no-banner --redact

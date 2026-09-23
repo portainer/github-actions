@@ -1,0 +1,247 @@
+name: reusable / validate
+
+# Every composite-action reference below is pinned to the full
+# owner/repo/path@ref form (portainer/github-actions/.github/actions/x@ref),
+# never a local `./` path. Reusable-workflow steps run with the CALLING
+# repository's context, so a local `./` reference here would resolve
+# against whatever repo is consuming this workflow, not this one — that's
+# true regardless of which repo hosts the workflow file, and it's the
+# reason a dedicated shared-workflows repo doesn't get local paths "for
+# free" just by existing. Only the pinned form is fetched deterministically.
+#
+# Those refs are pinned to the tag this repo is releasing as, never to
+# develop — an internal reference can't be a SHA of its own commit, so the
+# tag is what keeps a released workflow and the actions it calls in
+# lockstep. scripts/pin-internal-refs.py bumps and verifies them; run
+# `bump <tag>` to prepare the commit, then `verify <tag>` before pushing
+# the tag.
+#
+# checkout-with-submodules performs its own real checkout of the calling
+# repo (with a scoped GitHub App token, for submodule access) — no
+# preparation checkout is needed before calling it, since a pinned action
+# reference is fetched directly by the runner regardless of workspace
+# content. The `secrets` and `helm` jobs below DO keep a plain checkout —
+# not to make a local path resolvable, but because their own steps need the
+# caller's real repo content (full git history for gitleaks, the actual
+# chart/ directory for helm) that no composite action call in those jobs
+# otherwise provides.
+
+on:
+  workflow_call:
+    inputs:
+      runtime:
+        description: 'bun or node'
+        type: string
+        required: true
+      package-manager:
+        description: 'bun, pnpm, or npm'
+        type: string
+        required: true
+      bun-version:
+        type: string
+        required: false
+        default: '1.3.14'
+      node-version:
+        type: string
+        required: false
+        default: '24'
+      app-repositories:
+        description: 'Comma-separated repo list the checkout token is scoped to (this repo plus any private submodules), e.g. "my-app,my-private-submodule"'
+        type: string
+        required: true
+      submodules:
+        type: string
+        required: false
+        default: 'true'
+      run-format-check:
+        type: boolean
+        required: false
+        default: true
+      run-lint:
+        type: boolean
+        required: false
+        default: true
+      run-typecheck:
+        type: boolean
+        required: false
+        default: true
+      run-test:
+        type: boolean
+        required: false
+        default: true
+      run-build:
+        type: boolean
+        required: false
+        default: true
+      format-check-script:
+        type: string
+        required: false
+        default: 'format:check'
+      lint-script:
+        type: string
+        required: false
+        default: 'lint'
+      typecheck-script:
+        type: string
+        required: false
+        default: 'typecheck'
+      test-script:
+        type: string
+        required: false
+        default: 'test'
+      build-script:
+        type: string
+        required: false
+        default: 'build'
+      run-secrets-scan:
+        type: boolean
+        required: false
+        default: true
+      run-helm:
+        type: boolean
+        required: false
+        default: true
+      gitleaks-version:
+        type: string
+        required: false
+        default: '8.30.1'
+      gitleaks-sha256:
+        type: string
+        required: false
+        default: '551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb'
+      chart-path:
+        type: string
+        required: false
+        default: 'chart/'
+      enforce-no-secrets-guard:
+        description: >
+          Opt-in only — see chart-render-guard's own description. Charts that
+          legitimately render a Secret would fail CI/release with this on.
+        type: boolean
+        required: false
+        default: false
+    secrets:
+      app-id:
+        required: true
+      app-private-key:
+        required: true
+
+jobs:
+  lint:
+    name: lint
+    if: inputs.run-format-check || inputs.run-lint || inputs.run-typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: portainer/github-actions/.github/actions/checkout-with-submodules@v1.0.0
+        with:
+          app-id: ${{ secrets.app-id }}
+          private-key: ${{ secrets.app-private-key }}
+          repositories: ${{ inputs.app-repositories }}
+          submodules: ${{ inputs.submodules }}
+
+      - uses: portainer/github-actions/.github/actions/setup-toolchain@v1.0.0
+        with:
+          runtime: ${{ inputs.runtime }}
+          package-manager: ${{ inputs.package-manager }}
+          bun-version: ${{ inputs.bun-version }}
+          node-version: ${{ inputs.node-version }}
+
+      - name: '[validation] check formatting'
+        if: inputs.run-format-check
+        shell: bash
+        run: ${{ inputs.package-manager }} run ${{ inputs.format-check-script }}
+
+      - name: '[validation] run lint'
+        if: inputs.run-lint
+        shell: bash
+        run: ${{ inputs.package-manager }} run ${{ inputs.lint-script }}
+
+      - name: '[validation] run typecheck'
+        if: inputs.run-typecheck
+        shell: bash
+        run: ${{ inputs.package-manager }} run ${{ inputs.typecheck-script }}
+
+  test:
+    name: test
+    if: inputs.run-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: portainer/github-actions/.github/actions/checkout-with-submodules@v1.0.0
+        with:
+          app-id: ${{ secrets.app-id }}
+          private-key: ${{ secrets.app-private-key }}
+          repositories: ${{ inputs.app-repositories }}
+          submodules: ${{ inputs.submodules }}
+
+      - uses: portainer/github-actions/.github/actions/setup-toolchain@v1.0.0
+        with:
+          runtime: ${{ inputs.runtime }}
+          package-manager: ${{ inputs.package-manager }}
+          bun-version: ${{ inputs.bun-version }}
+          node-version: ${{ inputs.node-version }}
+
+      - name: '[validation] run tests'
+        shell: bash
+        run: ${{ inputs.package-manager }} run ${{ inputs.test-script }}
+
+  build:
+    name: build
+    if: inputs.run-build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: portainer/github-actions/.github/actions/checkout-with-submodules@v1.0.0
+        with:
+          app-id: ${{ secrets.app-id }}
+          private-key: ${{ secrets.app-private-key }}
+          repositories: ${{ inputs.app-repositories }}
+          submodules: ${{ inputs.submodules }}
+
+      - uses: portainer/github-actions/.github/actions/setup-toolchain@v1.0.0
+        with:
+          runtime: ${{ inputs.runtime }}
+          package-manager: ${{ inputs.package-manager }}
+          bun-version: ${{ inputs.bun-version }}
+          node-version: ${{ inputs.node-version }}
+
+      - name: '[validation] run build'
+        shell: bash
+        run: ${{ inputs.package-manager }} run ${{ inputs.build-script }}
+
+  secrets:
+    name: secrets
+    if: inputs.run-secrets-scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: '[preparation] checkout (gitleaks needs real, full git history)'
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - uses: portainer/github-actions/.github/actions/install-and-run-gitleaks@v1.0.0
+        with:
+          gitleaks-version: ${{ inputs.gitleaks-version }}
+          gitleaks-sha256: ${{ inputs.gitleaks-sha256 }}
+
+  helm:
+    name: helm
+    if: inputs.run-helm
+    runs-on: ubuntu-latest
+    steps:
+      - name: '[preparation] checkout (need the real chart/ directory from the caller)'
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: '[preparation] set up helm'
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+
+      - name: '[validation] lint chart'
+        shell: bash
+        run: helm lint ${{ inputs.chart-path }}
+
+      - name: '[validation] template chart (dry-run render)'
+        shell: bash
+        run: helm template release-check ${{ inputs.chart-path }} > /dev/null
+
+      - uses: portainer/github-actions/.github/actions/chart-render-guard@v1.0.0
+        if: inputs.enforce-no-secrets-guard
+        with:
+          chart-path: ${{ inputs.chart-path }}

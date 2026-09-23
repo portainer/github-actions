@@ -1,0 +1,45 @@
+name: docker-scout-scan
+description: >
+  Scan a published image with Docker Scout, failing on unfixed critical/high
+  CVEs. Optionally scoped to a single platform — Scout silently only scans
+  one arch of a multi-arch manifest unless a platform is given, which matters
+  for the native-arch build strategy where this gets called once per arch.
+
+inputs:
+  image:
+    description: 'Full image reference to scan'
+    required: true
+  platform:
+    description: 'Optional platform, e.g. linux/amd64 — omit for a single-arch image'
+    required: false
+    default: ''
+  write-comment:
+    description: 'Whether to post/update a PR comment with results'
+    required: false
+    default: 'true'
+  registry-username:
+    description: 'Registry username, passed through from the caller''s own secrets'
+    required: true
+  registry-password:
+    description: 'Registry password or access token, passed through from the caller''s own secrets'
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: '[preparation] log in to registry'
+      uses: docker/login-action@b45d80f862d83dbcd57f89517bcf500b2ab88fb2 # v4.0.0
+      with:
+        username: ${{ inputs.registry-username }}
+        password: ${{ inputs.registry-password }}
+
+    - name: '[validation] docker scout scan'
+      uses: docker/scout-action@7c6b6c3f7844478ace1ffd4e7aef649053d1f87d # v1.24.0
+      with:
+        command: cves
+        image: registry://${{ inputs.image }}
+        platform: ${{ inputs.platform }}
+        only-severities: critical,high
+        only-fixed: true
+        exit-code: true
+        write-comment: ${{ inputs.write-comment }}

@@ -1,0 +1,96 @@
+name: reusable / publish-chart
+
+# Packages and pushes the Helm chart. One call per REPOSITORY, not per image
+# — which is the whole reason this is its own workflow rather than a job
+# alongside manifest assembly.
+#
+# Bundling it with manifest assembly would mix a per-image concern with a
+# per-repo one: a repo with two images would call that workflow twice and
+# publish its chart twice. Kept apart, every caller composes the same
+# blocks and simply repeats the per-image ones.
+#
+# The event gate below deliberately stays INSIDE this workflow rather than
+# moving out to an `if:` on the caller's job — see the README for why every
+# trigger file stays structurally identical, differing only in inputs.
+#
+# There is deliberately no publish-chart boolean input: the event check
+# below is the real gate, so such an input would be a permanent no-op.
+#
+# image-tag (often empty) only decides what the chart gets VERSIONED as: an
+# explicit pre-release/release dispatch wants image and chart versions to
+# match exactly, but a plain CI/dev push's tag is an auto-detected branch or
+# PR name ("develop", "pr-42") that would be nonsensical as a chart version
+# — that case falls back to reading Chart.yaml's own version.
+#
+# Every composite-action reference below is pinned to the full
+# owner/repo/path@ref form — see validate.yml's header for why a local `./`
+# path can't be used here even though the action lives in the same repo.
+
+on:
+  workflow_call:
+    inputs:
+      image-tag:
+        description: 'Explicit X.Y.Z version for a pre-release/release dispatch — empty for a plain CI/dev push'
+        type: string
+        required: false
+        default: ''
+      chart-path:
+        type: string
+        required: false
+        default: 'chart/'
+      chart-oci-registry:
+        description: >
+          Defaults to the dev-charts path so a plain CI/pre-release push can
+          never collide with (or be mistaken for) a real release artifact. A
+          real release passes oci://ghcr.io/portainer/charts explicitly.
+        type: string
+        required: false
+        default: 'oci://ghcr.io/portainer/dev-charts'
+
+jobs:
+  package:
+    name: package
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: '[validation] image-tag is exactly X.Y.Z'
+        if: inputs.image-tag != ''
+        shell: bash
+        env:
+          IMAGE_TAG: ${{ inputs.image-tag }}
+        run: |
+          if [[ ! "$IMAGE_TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::image-tag ('$IMAGE_TAG') isn't plain X.Y.Z (e.g. 1.2.3, no -prerelease/+build suffix) — it's forwarded straight to the chart's version/appVersion, and this repo's convention is that a version is always exactly X.Y.Z, matching the image tag exactly."
+            exit 1
+          fi
+
+      - name: '[preparation] checkout'
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: '[preparation] read chart version'
+        id: chart-version
+        shell: bash
+        env:
+          IMAGE_TAG: ${{ inputs.image-tag }}
+        run: |
+          if [ -n "$IMAGE_TAG" ]; then
+            version="$IMAGE_TAG"
+          else
+            version=$(awk -F': *' '/^version:/ {print $2; exit}' "${{ inputs.chart-path }}Chart.yaml")
+          fi
+          if [ -z "$version" ]; then
+            echo "::error::could not determine chart version (no image-tag override, and no version: field in ${{ inputs.chart-path }}Chart.yaml)"
+            exit 1
+          fi
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+
+      - name: '[execution] publish chart'
+        uses: portainer/github-actions/.github/actions/package-and-push-chart@v1.0.0
+        with:
+          chart-path: ${{ inputs.chart-path }}
+          version: ${{ steps.chart-version.outputs.value }}
+          oci-registry: ${{ inputs.chart-oci-registry }}
+          registry-token: ${{ secrets.GITHUB_TOKEN }}

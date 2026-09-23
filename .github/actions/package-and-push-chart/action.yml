@@ -1,0 +1,58 @@
+name: package-and-push-chart
+description: >
+  Package a Helm chart, forcing its version/appVersion to a given value, and
+  push it as an OCI artifact. Its only caller is publish-chart.yml, which
+  serves both purposes from one path rather than two pipelines: a real
+  release passes the released semver and oci://ghcr.io/portainer/charts,
+  while a push to develop/release/** or a pre-release dispatch (never a
+  PR's own commits) publishes a dev/test chart to the separate
+  oci://ghcr.io/portainer/dev-charts path, so the two can never collide.
+  The version is either an explicit X.Y.Z override or, on a plain CI push
+  where the resolved tag would be a branch name, the chart's own
+  Chart.yaml — see publish-chart.yml's image-tag input.
+
+inputs:
+  chart-path:
+    description: 'Path to the chart directory'
+    required: false
+    default: 'chart/'
+  version:
+    description: 'Chart version AND appVersion to force (SemVer-shaped, e.g. 1.2.3)'
+    required: true
+  oci-registry:
+    description: 'OCI destination to push to'
+    required: false
+    default: 'oci://ghcr.io/portainer/charts'
+  registry-token:
+    description: 'Caller passes secrets.GITHUB_TOKEN (or another token with packages:write on the destination)'
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: '[preparation] set up helm'
+      uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+
+    - name: '[preparation] log in to ghcr.io'
+      shell: bash
+      env:
+        REGISTRY_TOKEN: ${{ inputs.registry-token }}
+      run: echo "$REGISTRY_TOKEN" | helm registry login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+    - name: '[execution] package chart'
+      shell: bash
+      env:
+        CHART_PATH: ${{ inputs.chart-path }}
+        VERSION: ${{ inputs.version }}
+      run: |
+        mkdir -p /tmp/chart-dist
+        helm package "$CHART_PATH" \
+          --version "$VERSION" \
+          --app-version "$VERSION" \
+          -d /tmp/chart-dist
+
+    - name: '[execution] push chart'
+      shell: bash
+      env:
+        OCI_REGISTRY: ${{ inputs.oci-registry }}
+      run: helm push /tmp/chart-dist/*.tgz "$OCI_REGISTRY"
