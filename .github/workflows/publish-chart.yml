@@ -16,11 +16,32 @@ name: reusable / publish-chart
 # There is deliberately no publish-chart boolean input: the event check
 # below is the real gate, so such an input would be a permanent no-op.
 #
-# image-tag (often empty) only decides what the chart gets VERSIONED as: an
-# explicit pre-release/release dispatch wants image and chart versions to
-# match exactly, but a plain CI/dev push's tag is an auto-detected branch or
-# PR name ("develop", "pr-42") that would be nonsensical as a chart version
-# — that case falls back to reading Chart.yaml's own version.
+# What gets published depends on how the caller ran:
+#
+# - push (develop/release/**): a dev chart snapshot. Its version is the one
+#   the branch ships next, derived from the repo's GitHub Releases by the
+#   chart-version action (never Chart.yaml's placeholder). Every push until
+#   the next release/pre-release overwrites that same version.
+# - workflow_dispatch with pre-release true: a pre-release dev chart at the
+#   dispatched version (image-tag), annotated
+#   dev-charts.portainer.io/pre-release so later pushes step past it rather
+#   than overwrite it.
+# - workflow_dispatch with pre-release false: the real release chart at the
+#   dispatched version. The only mode allowed to target
+#   oci://ghcr.io/portainer/charts.
+#
+# Both dev modes point the chart at the CI image built in the same run: every
+# `repository: portainer/...` in values.yaml becomes `portainerci/...`, with
+# that image's tag set to what the run pushed (develop, X.Y, or the
+# pre-release X.Y.Z). appVersion always equals the chart version. A real
+# release chart is packaged from the repo's chart untouched, so it pulls
+# portainer/<addon>:X.Y.Z via appVersion. All of this edits a staged copy of
+# the chart on the runner, never the repo.
+#
+# The dev-charts.portainer.io/ annotation prefix is reserved for dev-only
+# metadata and must never reach the release registry: publishing fails if
+# the repo's own Chart.yaml carries one, and package-and-push-chart refuses
+# to push any chart carrying one outside a pre-release.
 #
 # Every composite-action reference below is pinned to the full
 # owner/repo/path@ref form — see validate.yml's header for why a local `./`
@@ -56,41 +77,108 @@ jobs:
       contents: read
       packages: write
     steps:
-      - name: '[validation] image-tag is exactly X.Y.Z'
-        if: inputs.image-tag != ''
+      - name: '[validation] publish mode and target'
+        id: mode
         shell: bash
         env:
+          EVENT_NAME: ${{ github.event_name }}
+          PRE_RELEASE: ${{ github.event.inputs.pre-release }}
           IMAGE_TAG: ${{ inputs.image-tag }}
+          OCI_REGISTRY: ${{ inputs.chart-oci-registry }}
         run: |
-          if [[ ! "$IMAGE_TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::image-tag ('$IMAGE_TAG') isn't plain X.Y.Z (e.g. 1.2.3, no -prerelease/+build suffix) — it's forwarded straight to the chart's version/appVersion, and this repo's convention is that a version is always exactly X.Y.Z, matching the image tag exactly."
+          if [ "$EVENT_NAME" = push ]; then
+            [ -z "$IMAGE_TAG" ] || { echo "::error::image-tag is for a release/pre-release dispatch only; a push derives its own dev chart version."; exit 1; }
+            mode=snapshot
+          else
+            case "$PRE_RELEASE" in
+              true) mode=pre-release ;;
+              false) mode=release ;;
+              *) echo "::error::this workflow_dispatch has no boolean 'pre-release' input (got '$PRE_RELEASE'); the calling release.yml must define 'version' and 'pre-release' inputs."; exit 1 ;;
+            esac
+            [ -n "$IMAGE_TAG" ] || { echo "::error::a $mode dispatch must pass image-tag (the version)."; exit 1; }
+            if [[ ! "$IMAGE_TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::image-tag ('$IMAGE_TAG') isn't plain X.Y.Z (e.g. 1.2.3, no -prerelease/+build suffix); it becomes the chart's version and appVersion."
+              exit 1
+            fi
+          fi
+          registry="${OCI_REGISTRY%/}"
+          if [ "$mode" != release ] && { [ "$registry" = oci://ghcr.io/portainer/charts ] || [[ "$registry" == oci://ghcr.io/portainer/charts/* ]]; }; then
+            echo "::error::only a real release (workflow_dispatch with pre-release false) may publish to $registry; this is a $mode."
             exit 1
           fi
+          echo "value=$mode" >> "$GITHUB_OUTPUT"
 
       - name: '[preparation] checkout'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - name: '[preparation] read chart version'
-        id: chart-version
+      - name: '[preparation] set up helm'
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+
+      # The tag build-image pushed on this same push: develop, or X.Y on
+      # release/X.Y.
+      - name: '[preparation] resolve the pushed image tag'
+        id: push-tag
+        if: steps.mode.outputs.value == 'snapshot'
+        uses: portainer/github-actions/.github/actions/resolve-image-tag@v1.0.0
+
+      - name: '[preparation] derive the dev chart version'
+        id: derived
+        if: steps.mode.outputs.value == 'snapshot'
+        uses: portainer/github-actions/.github/actions/chart-version@v1.0.0
+        with:
+          mode: derive
+          chart-path: ${{ inputs.chart-path }}
+          dev-chart-registry: ${{ inputs.chart-oci-registry }}
+
+      - name: '[preparation] stage the chart'
+        id: stage
         shell: bash
         env:
-          IMAGE_TAG: ${{ inputs.image-tag }}
+          MODE: ${{ steps.mode.outputs.value }}
+          CHART_PATH: ${{ inputs.chart-path }}
+          VERSION: ${{ steps.mode.outputs.value == 'snapshot' && steps.derived.outputs.version || inputs.image-tag }}
+          IMAGE_TAG: ${{ steps.mode.outputs.value == 'snapshot' && steps.push-tag.outputs.value || inputs.image-tag }}
         run: |
-          if [ -n "$IMAGE_TAG" ]; then
-            version="$IMAGE_TAG"
-          else
-            version=$(awk -F': *' '/^version:/ {print $2; exit}' "${{ inputs.chart-path }}Chart.yaml")
-          fi
-          if [ -z "$version" ]; then
-            echo "::error::could not determine chart version (no image-tag override, and no version: field in ${{ inputs.chart-path }}Chart.yaml)"
+          set -euo pipefail
+          src="${CHART_PATH%/}"
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::chart version '$VERSION' isn't plain X.Y.Z."
             exit 1
           fi
-          echo "value=$version" >> "$GITHUB_OUTPUT"
+
+          reserved=$(yq -r '(.annotations // {}) | keys | .[] | select(test("^dev-charts\\.portainer\\.io/"))' "$src/Chart.yaml")
+          if [ -n "$reserved" ]; then
+            echo "::error file=$src/Chart.yaml::dev-charts.portainer.io/* annotations are added at publish time only and must never be committed: $reserved"
+            exit 1
+          fi
+
+          staged="$RUNNER_TEMP/staged-chart"
+          rm -rf "$staged"
+          cp -a "$src" "$staged"
+
+          if [ "$MODE" != release ]; then
+            images='.. | select(tag == "!!map" and has("repository")) | select((.repository | tag) == "!!str") | select(.repository | test("^portainer/"))'
+            count=$(yq "[$images] | length" "$staged/values.yaml")
+            if [ "$count" -eq 0 ]; then
+              echo "::error file=$src/values.yaml::no 'repository: portainer/...' image in values.yaml, so the $MODE chart can't be pointed at the CI image built in this run."
+              exit 1
+            fi
+            yq -i "($images) |= (.repository |= sub(\"^portainer/\"; \"portainerci/\") | .tag = strenv(IMAGE_TAG) | .tag style=\"single\")" "$staged/values.yaml"
+            echo "::notice::pointed $count image(s) at portainerci with tag $IMAGE_TAG"
+          fi
+
+          if [ "$MODE" = pre-release ]; then
+            yq -i '.annotations["dev-charts.portainer.io/pre-release"] = "true"' "$staged/Chart.yaml"
+          fi
+
+          echo "path=$staged/" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: '[execution] publish chart'
         uses: portainer/github-actions/.github/actions/package-and-push-chart@v1.0.0
         with:
-          chart-path: ${{ inputs.chart-path }}
-          version: ${{ steps.chart-version.outputs.value }}
+          chart-path: ${{ steps.stage.outputs.path }}
+          version: ${{ steps.stage.outputs.version }}
           oci-registry: ${{ inputs.chart-oci-registry }}
           registry-token: ${{ secrets.GITHUB_TOKEN }}
+          allow-dev-annotations: ${{ steps.mode.outputs.value == 'pre-release' }}

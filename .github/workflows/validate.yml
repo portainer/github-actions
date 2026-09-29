@@ -241,7 +241,51 @@ jobs:
         shell: bash
         run: helm template release-check ${{ inputs.chart-path }} > /dev/null
 
+      # An early warning on the PR only: a caller can switch this whole job
+      # off with run-helm. publish-chart.yml and package-and-push-chart
+      # enforce the same rule and can't be switched off.
+      - name: '[validation] no dev-charts.portainer.io/ annotations in Chart.yaml'
+        shell: bash
+        env:
+          CHART_PATH: ${{ inputs.chart-path }}
+        run: |
+          chart="${CHART_PATH%/}/Chart.yaml"
+          found=$(yq -r '(.annotations // {}) | keys | .[] | select(test("^dev-charts\\.portainer\\.io/"))' "$chart")
+          if [ -n "$found" ]; then
+            echo "::error file=$chart::dev-charts.portainer.io/* annotations are added at publish time only; remove them: $(echo $found)"
+            exit 1
+          fi
+
       - uses: portainer/github-actions/.github/actions/chart-render-guard@v1.0.0
         if: inputs.enforce-no-secrets-guard
         with:
           chart-path: ${{ inputs.chart-path }}
+
+  # Release and pre-release dispatches only; shows as skipped on PR and push
+  # runs. Lives here because every build job in a consumer's release.yml
+  # needs validate, so it runs once, before any image or chart is pushed. A
+  # job of its own rather than a step in helm: run-helm can't switch it off,
+  # and it adds a check name without renaming an existing one.
+  #
+  # Reads the caller's own workflow_dispatch inputs, which must be named
+  # `version` and `pre-release` (see the README); it fails clearly if either
+  # is missing. It checks the chart registry and GitHub Releases, not the
+  # images: an image without a chart means an earlier run died partway, and
+  # re-running to finish it should still work.
+  version:
+    name: version
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: '[preparation] checkout (need the chart name from Chart.yaml)'
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: '[preparation] set up helm'
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+
+      - uses: portainer/github-actions/.github/actions/chart-version@v1.0.0
+        with:
+          mode: check
+          chart-path: ${{ inputs.chart-path }}
+          version: ${{ github.event.inputs.version }}
+          pre-release: ${{ github.event.inputs.pre-release }}

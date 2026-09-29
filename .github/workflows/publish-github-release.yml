@@ -1,7 +1,9 @@
 name: reusable / publish-github-release
 
-# Creates the GitHub Release and marks it latest. One call per REPOSITORY,
-# release path only.
+# Creates the GitHub Release, marking it latest only when it's the highest
+# release. One call per REPOSITORY, release path only. A patch on an older
+# line (e.g. 0.6.3 after 0.7.1) still gets its GitHub Release, just not
+# marked latest.
 #
 # Why its own reusable workflow, rather than either alternative:
 # - As a job inside a shared workflow that CI also calls, GitHub's static
@@ -50,7 +52,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: '[validation] still the intended latest'
+      - name: '[preparation] latest or not'
         id: check
         shell: bash
         env:
@@ -66,23 +68,21 @@ jobs:
             latest_tag=""
           fi
           if [ -z "$latest_tag" ]; then
-            echo "::notice::No existing latest release found — proceeding."
-            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No existing latest release found; $VERSION becomes latest."
+            echo "latest=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          highest="$(printf '%s\n%s\n' "$latest_tag" "$VERSION" | sort -V | tail -1)"
+          highest="$(printf '%s\n%s\n' "${latest_tag#v}" "$VERSION" | sort -V | tail -1)"
           if [ "$highest" != "$VERSION" ]; then
-            echo "::notice::'$VERSION' is older than GitHub's current latest release ('$latest_tag') — skipping so latest doesn't move backwards. This is a safe no-op, not an error, and can happen if another release run finished in between."
-            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::'$VERSION' is older than the current latest release ('$latest_tag'), so it's released without being marked latest."
+            echo "latest=false" >> "$GITHUB_OUTPUT"
           else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "latest=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - if: steps.check.outputs.skip != 'true'
-        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+      - uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
 
-      - if: steps.check.outputs.skip != 'true'
-        uses: docker/login-action@b45d80f862d83dbcd57f89517bcf500b2ab88fb2 # v4.0.0
+      - uses: docker/login-action@b45d80f862d83dbcd57f89517bcf500b2ab88fb2 # v4.0.0
         with:
           username: ${{ secrets.registry-username }}
           password: ${{ secrets.registry-password }}
@@ -92,7 +92,6 @@ jobs:
       # runtime-length list, and the check is two commands — log in once
       # above, then inspect each ref. Keeps this a single job.
       - name: '[validation] every image exists'
-        if: steps.check.outputs.skip != 'true'
         shell: bash
         env:
           IMAGE_REFS: ${{ inputs.image-refs }}
@@ -117,15 +116,17 @@ jobs:
       # already ran against, so this doesn't need to check out anything by
       # tag name.
       - name: '[execution] create release'
-        if: steps.check.outputs.skip != 'true'
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ inputs.version }}
+          LATEST: ${{ steps.check.outputs.latest }}
         run: |
+          # --latest=false is explicit: GitHub otherwise marks a new release
+          # latest by default, which would move latest backwards.
           gh release create "$VERSION" \
             --repo "${{ github.repository }}" \
             --title "$VERSION" \
             --target "${{ github.sha }}" \
             --generate-notes \
-            --latest
+            --latest="$LATEST"

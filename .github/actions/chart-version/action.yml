@@ -1,0 +1,87 @@
+name: chart-version
+description: >
+  Works out or checks an add-on chart's version from the repo's GitHub
+  Releases, so no publish path ever reads the version: field in Chart.yaml
+  (it's a placeholder, as every consumer's docs say).
+
+  mode: derive (publish-chart.yml, on a push) gives the version the pushed
+  branch ships next:
+    - release/X.Y: the highest release in X.Y with patch + 1, or X.Y.0 if
+      the line has no release yet.
+    - develop, when the repo has release/* branches: the highest release
+      line (across branches and releases) with minor + 1 and patch 0.
+    - develop, when the repo releases from develop: the latest release with
+      patch + 1.
+    - no release and no release branch at all: Chart.yaml's version
+      (initial setup only).
+  If that version is already in dev-charts as a pre-release (annotation
+  dev-charts.portainer.io/pre-release), it steps to the next patch until
+  it finds one that isn't, so a push never overwrites a pre-release chart.
+  Every push between releases/pre-releases overwrites the same version.
+
+  mode: check (validate.yml's version job, on a release/pre-release
+  dispatch) fails before anything is pushed unless the dispatched version:
+    - is plain X.Y.Z (a leading v is stripped);
+    - is on the branch's line, when dispatched from release/X.Y;
+    - is higher than the highest release in its line;
+    - and, for a real release only, has no GitHub Release and no chart in
+      the release chart registry yet.
+
+  Lookups are anonymous (both chart registries are public) and releases are
+  read with the token below. Needs helm on the runner; yq ships on GitHub's
+  ubuntu runners.
+
+inputs:
+  mode:
+    description: 'derive or check'
+    required: true
+  chart-path:
+    required: false
+    default: 'chart/'
+  dev-chart-registry:
+    required: false
+    default: 'oci://ghcr.io/portainer/dev-charts'
+  release-chart-registry:
+    required: false
+    default: 'oci://ghcr.io/portainer/charts'
+  version:
+    description: 'check only: the dispatched version input'
+    required: false
+    default: ''
+  pre-release:
+    description: 'check only: the dispatched pre-release input (true/false)'
+    required: false
+    default: ''
+  github-token:
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  version:
+    description: 'derive only: the dev chart version'
+    value: ${{ steps.run.outputs.version }}
+
+runs:
+  using: composite
+  steps:
+    - name: '[preparation] chart version (${{ inputs.mode }})'
+      id: run
+      shell: bash
+      env:
+        MODE: ${{ inputs.mode }}
+        GH_TOKEN: ${{ inputs.github-token }}
+        REPO: ${{ github.repository }}
+        REF_NAME: ${{ github.ref_name }}
+        CHART_PATH: ${{ inputs.chart-path }}
+        DEV_REGISTRY: ${{ inputs.dev-chart-registry }}
+        RELEASE_REGISTRY: ${{ inputs.release-chart-registry }}
+        VERSION_INPUT: ${{ inputs.version }}
+        PRE_RELEASE_INPUT: ${{ inputs.pre-release }}
+      run: |
+        script="$GITHUB_ACTION_PATH/chart-version.sh"
+        if [ "$MODE" = derive ]; then
+          version=$(bash "$script" derive)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+        else
+          bash "$script" "$MODE"
+        fi

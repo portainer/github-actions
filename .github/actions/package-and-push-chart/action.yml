@@ -7,9 +7,14 @@ description: >
   while a push to develop/release/** or a pre-release dispatch (never a
   PR's own commits) publishes a dev/test chart to the separate
   oci://ghcr.io/portainer/dev-charts path, so the two can never collide.
-  The version is either an explicit X.Y.Z override or, on a plain CI push
-  where the resolved tag would be a branch name, the chart's own
-  Chart.yaml — see publish-chart.yml's image-tag input.
+  publish-chart.yml works out the version and stages the chart (pointing a
+  dev chart at its CI image) before calling this.
+
+  Last line of defence for the reserved dev-charts.portainer.io/ annotation
+  prefix: the packaged chart is inspected right before the push, and the
+  push fails if it carries any such annotation and the destination is the
+  release registry, or the caller didn't allow them (only a pre-release
+  does).
 
 inputs:
   chart-path:
@@ -26,6 +31,10 @@ inputs:
   registry-token:
     description: 'Caller passes secrets.GITHUB_TOKEN (or another token with packages:write on the destination)'
     required: true
+  allow-dev-annotations:
+    description: 'true only for a pre-release dev chart, the one chart allowed to carry dev-charts.portainer.io/ annotations'
+    required: false
+    default: 'false'
 
 runs:
   using: composite
@@ -50,6 +59,23 @@ runs:
           --version "$VERSION" \
           --app-version "$VERSION" \
           -d /tmp/chart-dist
+
+    - name: '[validation] no dev-only annotations outside a pre-release'
+      shell: bash
+      env:
+        OCI_REGISTRY: ${{ inputs.oci-registry }}
+        ALLOW: ${{ inputs.allow-dev-annotations }}
+      run: |
+        set -euo pipefail
+        registry="${OCI_REGISTRY%/}"
+        for pkg in /tmp/chart-dist/*.tgz; do
+          found=$(helm show chart "$pkg" | yq -r '(.annotations // {}) | keys | .[] | select(test("^dev-charts\\.portainer\\.io/"))')
+          [ -n "$found" ] || continue
+          if [ "$registry" = oci://ghcr.io/portainer/charts ] || [[ "$registry" == oci://ghcr.io/portainer/charts/* ]] || [ "$ALLOW" != true ]; then
+            echo "::error::$(basename "$pkg") carries dev-only annotations ($(echo $found)) and is bound for $registry; refusing to push."
+            exit 1
+          fi
+        done
 
     - name: '[execution] push chart'
       shell: bash

@@ -15,11 +15,11 @@ blocks a second time. Nothing here assumes a single image.
 
 | Block | Called | Purpose |
 |---|---|---|
-| `validate.yml` | once per repo | lint, test, build, secret scan, Helm chart lint/render |
+| `validate.yml` | once per repo | lint, test, build, secret scan, Helm chart lint/render; on a release dispatch, the version check |
 | `build-image.yml` | once **per image** | builds every arch, pushes by digest, assembles the multi-arch tag |
 | `scout.yml` | once **per image** | Docker Scout vulnerability scan |
-| `publish-chart.yml` | once per repo | packages and pushes the Helm chart |
-| `publish-github-release.yml` | once per repo, release path only | creates the GitHub Release, marks it latest |
+| `publish-chart.yml` | once per repo | packages and pushes the Helm chart (dev chart on push/pre-release, release chart on release) |
+| `publish-github-release.yml` | once per repo, release path only | creates the GitHub Release, marked latest only if it's the highest |
 
 `ci.yml` and `release.yml` end up structurally identical across every
 consumer — same blocks, same order — differing only in which inputs they
@@ -28,7 +28,7 @@ picks the registry namespace/chart registry and whether a GitHub Release
 gets created at all.
 
 The composite actions under `.github/actions/` (`resolve-image-tag`,
-`checkout-with-submodules`, `package-and-push-chart`, `docker-scout-scan`,
+`chart-version`, `checkout-with-submodules`, `package-and-push-chart`, `docker-scout-scan`,
 `install-and-run-gitleaks`, `setup-toolchain`, `chart-render-guard`) are
 internal building blocks the workflows above call — no consumer repo
 references one of these directly.
@@ -98,9 +98,58 @@ jobs:
 
 `release.yml` follows the same shape, adding `version`/`pre-release`
 `workflow_dispatch` inputs and a terminal `publish-release` job gated on
-`!inputs.pre-release`. A two-image repo repeats the `build-image` and `scout`
+`!inputs.pre-release`. The inputs must be named exactly `version` (a string,
+`X.Y.Z` or `vX.Y.Z`) and `pre-release` (a boolean): `validate.yml`'s
+`version` job and `publish-chart.yml` read them from the dispatch event
+directly, and fail if either is missing. A two-image repo repeats the `build-image` and `scout`
 jobs once per image, and passes each `build-image` call's `image-ref` output
 to `publish-github-release.yml`'s `image-refs` list.
+
+## Chart versions and dev charts
+
+`publish-chart.yml` never reads `version:` from `Chart.yaml`; it's a
+placeholder. Every chart's `appVersion` equals its `version`.
+
+- **Push to `develop` or `release/X.Y`** publishes a dev chart to
+  `oci://ghcr.io/portainer/dev-charts/<chart>` at the version that branch
+  ships next, derived from the repo's GitHub Releases:
+  - `release/X.Y`: the highest release in X.Y with patch + 1 (X.Y.0 if the
+    line has no release yet).
+  - `develop` in a repo with `release/*` branches: the highest release line
+    with minor + 1 and patch 0.
+  - `develop` in a repo that releases from `develop`: the latest release
+    with patch + 1.
+  - A repo with no release and no release branch falls back to
+    `Chart.yaml`'s version.
+
+  Every push until the next release or pre-release overwrites that same
+  version, so Portainer shows no upgrade in between: restart the pods to
+  pick up a newer image, and repair or reinstall to pick up chart changes.
+- **Pre-release dispatch** publishes a dev chart at the dispatched version,
+  annotated `dev-charts.portainer.io/pre-release: "true"`. A later push
+  never overwrites it: the derived version steps to the next patch instead.
+- **Real release dispatch** publishes to
+  `oci://ghcr.io/portainer/charts/<chart>`, the only mode allowed to.
+
+Dev charts (push and pre-release) pull the CI image built in the same run:
+every `repository: portainer/<image>` in `values.yaml` is rewritten to
+`portainerci/<image>`, with that image's `tag` set to what the run pushed
+(`develop`, `X.Y`, or the pre-release `X.Y.Z`). Release charts are packaged
+untouched and pull `portainer/<image>:X.Y.Z` through `appVersion`. Both
+edits happen on a staged copy on the runner, never in the repo.
+
+The `dev-charts.portainer.io/` annotation prefix is reserved for dev-only
+metadata and never reaches `charts/`: `validate / helm` flags it in a PR,
+`publish-chart.yml` fails if the repo's `Chart.yaml` carries it, and
+`package-and-push-chart` refuses to push a chart carrying it anywhere except
+a pre-release to `dev-charts`.
+
+On a release or pre-release dispatch, `validate / version` fails before
+anything is built or pushed unless the version is `X.Y.Z`, is on the branch's
+line (when dispatched from `release/X.Y`), and is higher than the highest
+release in its line. A real release additionally needs no existing GitHub
+Release and no existing chart in `charts/` at that version. A patch on an
+older line gets its GitHub Release without being marked latest.
 
 ## Versioning and pinning
 
