@@ -67,7 +67,7 @@ is_higher() {
 # Prints the Chart.yaml of <registry>/<name>:<version> and returns 0 when it
 # exists, returns 1 when it doesn't, and 2 on any other failure (network,
 # auth), so a lookup error is never mistaken for "not published".
-# Anonymous: both chart registries are public.
+# Authenticated with whatever ghcr.io login helm holds (action.yml logs in).
 chart_meta() {
   local out errfile
   errfile=$(mktemp)
@@ -82,6 +82,9 @@ chart_meta() {
     return 1
   fi
   cat "$errfile" >&2
+  if grep -qiE '401|403|unauthorized|denied' "$errfile"; then
+    echo "::warning::$1/$2 looks private or unreadable with this job's token; a private chart package needs packages: read on the calling job" >&2
+  fi
   rm -f "$errfile"
   return 2
 }

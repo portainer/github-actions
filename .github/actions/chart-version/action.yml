@@ -27,9 +27,12 @@ description: >
     - and, for a real release only, has no GitHub Release and no chart in
       the release chart registry yet.
 
-  Lookups are anonymous (both chart registries are public) and releases are
-  read with the token below. Needs helm on the runner; yq ships on GitHub's
-  ubuntu runners.
+  Releases are read with the token below, which is also used to log in to
+  ghcr.io for the chart lookups. Public charts need no package permission;
+  a private chart package needs packages: read on the calling job (a lookup
+  that can't be made fails the step rather than being read as "not
+  published"). Needs helm on the runner; yq ships on GitHub's ubuntu
+  runners.
 
 inputs:
   mode:
@@ -78,6 +81,10 @@ runs:
         VERSION_INPUT: ${{ inputs.version }}
         PRE_RELEASE_INPUT: ${{ inputs.pre-release }}
       run: |
+        # Best effort: a token without package access can still log in, and
+        # public charts don't need it anyway.
+        echo "$GH_TOKEN" | helm registry login ghcr.io --username "$GITHUB_ACTOR" --password-stdin >/dev/null 2>&1 ||
+          echo "::warning::couldn't log in to ghcr.io; chart lookups will be anonymous"
         script="$GITHUB_ACTION_PATH/chart-version.sh"
         if [ "$MODE" = derive ]; then
           version=$(bash "$script" derive)
