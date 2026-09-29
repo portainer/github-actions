@@ -119,12 +119,12 @@ jobs:
       - name: '[preparation] resolve the pushed image tag'
         id: push-tag
         if: steps.mode.outputs.value == 'snapshot'
-        uses: portainer/github-actions/.github/actions/resolve-image-tag@v1.0.0
+        uses: portainer/github-actions/.github/actions/resolve-image-tag@feat/pla-1027-dev-chart-versioning
 
       - name: '[preparation] derive the dev chart version'
         id: derived
         if: steps.mode.outputs.value == 'snapshot'
-        uses: portainer/github-actions/.github/actions/chart-version@v1.0.0
+        uses: portainer/github-actions/.github/actions/chart-version@feat/pla-1027-dev-chart-versioning
         with:
           mode: derive
           chart-path: ${{ inputs.chart-path }}
@@ -175,7 +175,7 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: '[execution] publish chart'
-        uses: portainer/github-actions/.github/actions/package-and-push-chart@v1.0.0
+        uses: portainer/github-actions/.github/actions/package-and-push-chart@feat/pla-1027-dev-chart-versioning
         with:
           chart-path: ${{ steps.stage.outputs.path }}
           version: ${{ steps.stage.outputs.version }}

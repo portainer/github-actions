@@ -132,14 +132,14 @@ jobs:
     if: inputs.run-format-check || inputs.run-lint || inputs.run-typecheck
     runs-on: ubuntu-latest
     steps:
-      - uses: portainer/github-actions/.github/actions/checkout-with-submodules@v1.0.0
+      - uses: portainer/github-actions/.github/actions/checkout-with-submodules@feat/pla-1027-dev-chart-versioning
         with:
           app-id: ${{ secrets.app-id }}
           private-key: ${{ secrets.app-private-key }}
           repositories: ${{ inputs.app-repositories }}
           submodules: ${{ inputs.submodules }}
 
-      - uses: portainer/github-actions/.github/actions/setup-toolchain@v1.0.0
+      - uses: portainer/github-actions/.github/actions/setup-toolchain@feat/pla-1027-dev-chart-versioning
         with:
           runtime: ${{ inputs.runtime }}
           package-manager: ${{ inputs.package-manager }}
@@ -166,14 +166,14 @@ jobs:
     if: inputs.run-test
     runs-on: ubuntu-latest
     steps:
-      - uses: portainer/github-actions/.github/actions/checkout-with-submodules@v1.0.0
+      - uses: portainer/github-actions/.github/actions/checkout-with-submodules@feat/pla-1027-dev-chart-versioning
         with:
           app-id: ${{ secrets.app-id }}
           private-key: ${{ secrets.app-private-key }}
           repositories: ${{ inputs.app-repositories }}
           submodules: ${{ inputs.submodules }}
 
-      - uses: portainer/github-actions/.github/actions/setup-toolchain@v1.0.0
+      - uses: portainer/github-actions/.github/actions/setup-toolchain@feat/pla-1027-dev-chart-versioning
         with:
           runtime: ${{ inputs.runtime }}
           package-manager: ${{ inputs.package-manager }}
@@ -189,14 +189,14 @@ jobs:
     if: inputs.run-build
     runs-on: ubuntu-latest
     steps:
-      - uses: portainer/github-actions/.github/actions/checkout-with-submodules@v1.0.0
+      - uses: portainer/github-actions/.github/actions/checkout-with-submodules@feat/pla-1027-dev-chart-versioning
         with:
           app-id: ${{ secrets.app-id }}
           private-key: ${{ secrets.app-private-key }}
           repositories: ${{ inputs.app-repositories }}
           submodules: ${{ inputs.submodules }}
 
-      - uses: portainer/github-actions/.github/actions/setup-toolchain@v1.0.0
+      - uses: portainer/github-actions/.github/actions/setup-toolchain@feat/pla-1027-dev-chart-versioning
         with:
           runtime: ${{ inputs.runtime }}
           package-manager: ${{ inputs.package-manager }}
@@ -217,7 +217,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: portainer/github-actions/.github/actions/install-and-run-gitleaks@v1.0.0
+      - uses: portainer/github-actions/.github/actions/install-and-run-gitleaks@feat/pla-1027-dev-chart-versioning
         with:
           gitleaks-version: ${{ inputs.gitleaks-version }}
           gitleaks-sha256: ${{ inputs.gitleaks-sha256 }}
@@ -256,7 +256,7 @@ jobs:
             exit 1
           fi
 
-      - uses: portainer/github-actions/.github/actions/chart-render-guard@v1.0.0
+      - uses: portainer/github-actions/.github/actions/chart-render-guard@feat/pla-1027-dev-chart-versioning
         if: inputs.enforce-no-secrets-guard
         with:
           chart-path: ${{ inputs.chart-path }}
@@ -283,7 +283,7 @@ jobs:
       - name: '[preparation] set up helm'
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
 
-      - uses: portainer/github-actions/.github/actions/chart-version@v1.0.0
+      - uses: portainer/github-actions/.github/actions/chart-version@feat/pla-1027-dev-chart-versioning
         with:
           mode: check
           chart-path: ${{ inputs.chart-path }}

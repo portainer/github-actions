@@ -139,12 +139,12 @@ jobs:
       tag: ${{ steps.resolve.outputs.value }}
     steps:
       - id: resolve
-        uses: portainer/github-actions/.github/actions/resolve-image-tag@v1.0.0
+        uses: portainer/github-actions/.github/actions/resolve-image-tag@feat/pla-1027-dev-chart-versioning
         with:
           image-tag: ${{ inputs.image-tag }}
           enforce-release-branch: ${{ inputs.enforce-release-branch }}
 
-      - uses: portainer/github-actions/.github/actions/checkout-with-submodules@v1.0.0
+      - uses: portainer/github-actions/.github/actions/checkout-with-submodules@feat/pla-1027-dev-chart-versioning
         with:
           app-id: ${{ secrets.app-id }}
           private-key: ${{ secrets.app-private-key }}

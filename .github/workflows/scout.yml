@@ -54,7 +54,7 @@ jobs:
         # full os/arch form.
         arch: [amd64, arm64]
     steps:
-      - uses: portainer/github-actions/.github/actions/docker-scout-scan@v1.0.0
+      - uses: portainer/github-actions/.github/actions/docker-scout-scan@feat/pla-1027-dev-chart-versioning
         with:
           image: ${{ inputs.image }}
           platform: linux/${{ matrix.arch }}
